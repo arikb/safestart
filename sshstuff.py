@@ -3,17 +3,16 @@
 from io import BytesIO
 import paramiko
 import socket  # mainly for socket errors
-import select
-from time import sleep
+
 
 import log
 l = log.getLogger(__name__)
 
-COMMAND_TERMINATION_MARKER = '--- SHELL COMMAND END ---'
-
 
 class SSHConnection:
     "an SSH connection, doing what we need at a higher level"
+
+    COPY_BUFFER_SIZE = 512
 
     def __init__(self, host_id, dest, known_hosts_file, username, key_file,
                  password=None):
@@ -44,6 +43,7 @@ class SSHConnection:
         # Internal state
         self._connected = False
         self._transport = None
+        self._sftp_session = None
 
     def _hostkey_verify(self):
         """
@@ -138,34 +138,80 @@ class SSHConnection:
             return False
         return self._transport.is_authenticated()
 
-    def execute_command(self, command):
+    def execute_command(self, command, sensitive=False):
         """
         Execute the `command` and return its return code, stdout and stderr.
+
+        If the command is `sensitive`, the command itself will not be logged.
         """
+        # for logging. Trenary operator seems like it would be perfect here.
+        logged_command = "[redacted]" if sensitive else command
+
         # must have a transport first
         transport = self.get_transport()
 
         # get a session channel and run the command inside
         chan = transport.open_session()
-        chan.set_name('command:' + command)
+        chan.set_name('command: ' + logged_command)
         chan.setblocking(True)
         chan.settimeout(10.0)
+
+        # and finally
         chan.exec_command(command)
 
         # wait for the command to terminate
         try:
             exit_status = chan.recv_exit_status()
         except socket.timeout:
+            l.error("Socket timeout when executing command %s", logged_command)
             return (None, None, None)
 
+        if exit_status > 0:
+            l.warning("Command %s returned exit status %d",
+                      logged_command, exit_status)
         # get stdout, stderr if available
         stdout_buf = BytesIO()
         stderr_buf = BytesIO()
         while chan.recv_ready():
-            stdout_buf.write(chan.recv(512))
+            stdout_buf.write(chan.recv(self.COPY_BUFFER_SIZE))
         while chan.recv_stderr_ready():
-            stderr_buf.write(chan.recv_stderr(512))
+            stderr_buf.write(chan.recv_stderr(self.COPY_BUFFER_SIZE))
         chan.close()
 
         return exit_status, stdout_buf, stderr_buf
+
+    def _get_sftp_session(self):
+        """returns an SFTP session to the server, creating it if needed"""
+        if self._sftp_session is None:
+
+            # must have a transport first
+            transport = self.get_transport()
+
+            # get a session channel and run the command inside
+            chan = transport.open_sftp_client()
+            chan.setblocking(True)
+            chan.settimeout(10.0)
+            self._sftp_session = chan
+
+        return self._sftp_session
+
+    def copy_local_to_remote(self, local, remote):
+        """ copy the `local` file to the `remote` path"""
+
+        l.debug("Copying (local)%s --> (remote)%s", local, remote)
+
+        sftp_session = self._get_sftp_session()
+        sftp_session.put(local, remote)
+
+        return True
+
+    def copy_remote_to_local(self, remote, local):
+        """ copy the `remote` file to the `local` path"""
+
+        l.debug("Copying (remote)%s --> (local)%s", remote, local)
+
+        sftp_session = self._get_sftp_session()
+        sftp_session.get(remote, local)
+
+        return True
 
