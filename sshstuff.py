@@ -1,217 +1,222 @@
 """do some useful things over SSH"""
 
 from io import BytesIO
-import paramiko
-import socket  # mainly for socket errors
+from paramiko.client import (SSHClient,
+                             AutoAddPolicy,
+                             RejectPolicy,
+                             WarningPolicy)
 
+import socket  # mainly for socket errors
+from select import select
+from threading import Event, Thread
 
 import log
 l = log.getLogger(__name__)
 
+BUF_SIZE = 512
 
-class SSHConnection:
-    "an SSH connection, doing what we need at a higher level"
 
-    COPY_BUFFER_SIZE = 512
+def _feed_file(source, destination, event, close=False):
+    """a thread feeding a source file-like object to a destination file-like"""
+    # this will block when waiting to read or write
+    l.debug("feeder thread started")
+    while True:
+        l.debug("feeder reading from input")
+        buf = source.read(BUF_SIZE)
+        l.debug("feeder read %s bytes", len(buf))
+        l.debug(repr(buf))
+        if len(buf) == 0:  # EOF
+            break
+        destination.write(buf)
+        l.debug("feeder wrote %s bytes", len(buf))
+    l.debug("feeder done")
+    if close:
+        l.debug("feeder closing destination")
+        destination.close()
+    source.close()
+    event.set()
 
-    def __init__(self, host_id, dest, known_hosts_file, username, key_file,
-                 password=None):
-        """Initialises but does not connect
 
-        `host_id` - a hostname for identifying the key
-        `dest` - where to actually connect to. Can be:
-            a hostname (or IP address)
-            a host:port string
-            a (host,port) tuple
-            an open socket
-        `known_hosts_file` - the known_hosts file that we use to verify the
-            remote key
-        `username` - the username for authentication
-        `key_file` - private key file for user auth
-        `password` - private key file password
+def _chan_sender(source, chan, event):
+    """send everything in the buffer to the channel, then shut sending down"""
+    while True:
+        l.debug("reading from input")
+        buf = source.read(BUF_SIZE)
+        if len(buf) == 0:
+            break
+        l.debug("sending to channel")
+        chan.sendall(buf)
 
+    l.debug("shutting channel write side")
+    chan.shutdown_write()
+    source.close()
+    event.set()
+
+
+def _chan_receiver(chan_recv, dest, event):
+    """receive what we can from a channel until EOF"""
+    while True:
+        l.debug("reading from channel")
+        buf = chan_recv(BUF_SIZE)
+        if len(buf) == 0:
+            break
+        l.debug("writing to output")
+        dest.write(buf)
+
+    l.debug("EOF encountered, closing destination")
+    event.set()
+
+
+class DBSSHClient(SSHClient):
+    """
+    an SSH client, but with emulated file transfer to get over DropBear
+    limitations
+    """
+    def pipe_through_filter2(self, command, i_buf):
         """
-
-        # parameters
-        self._host_id = host_id
-        self._dest = dest
-        self._known_hosts_file = known_hosts_file
-        self._username = username
-        self._key_file = key_file
-        self._password = password
-
-        # Internal state
-        self._connected = False
-        self._transport = None
-        self._sftp_session = None
-
-    def _hostkey_verify(self):
+        pipe input through a UNIX pipe on the remote end,
+        returning the result
         """
-        Use known hosts to verify the remote host with the local hosts file
-        and update it
-        """
-
-        # create and load the host keys object
-        host_keys = paramiko.HostKeys()
-        try:
-            host_keys.load(self._known_hosts_file)
-        except IOError:
-            l.info("Could not load host keys file %s",
-                   self._known_hosts_file, exc_info=True)
-
-        # check server's host key
-        host_key = self._transport.get_remote_server_key()
-        if host_keys.check(self._host_id, host_key):
-            l.info("Remote host key has been recognised")
-        elif (host_keys.lookup(self._host_id) and
-              host_keys.lookup(host_key.get_name())):
-            # the key is there but it didn't check out - danger!
-            l.error("Host key for host %s has changed!", self._host_id)
-            return False  # that's the only reason to fail here
-        else:
-            l.info("Host key for host %s was not found; adding.",
-                   self._host_id)
-            host_keys.add(self._host_id, host_key.get_name(), host_key)
-            try:
-                host_keys.save(self._known_hosts_file)
-            except IOError:
-                l.warn("Hosts file %s cannot be written",
-                       self._known_hosts_file, exc_info=True)
-
-        return True
-
-    def connect(self):
-        """connect to the remote host"""
-        if self._connected:
-            return True
-
-        try:
-            l.debug("Initialising a transport to the destination")
-            self._transport = paramiko.Transport(self._dest)
-            l.debug("Starting the client")
-            self._transport.start_client()
-        except paramiko.SSHException:
-            l.error("SSH negotiation failed")
-            return False
-        except socket.error:
-            l.error("Socket connection failure")
-            return False
-
-        # verify the host
-        l.debug("Verifying host key")
-        if not self._hostkey_verify():
-            return False
-
-        # authenticate
-        l.debug("Authenticating as %s@%s",
-                self._username, self._host_id)
-        if not self._rsa_key_auth():
-            l.error("Authentication failed for user %s@%s",
-                    self._username, self._host_id)
-            return False
-
-        l.info("Successfully connected as %s@%s",
-               self._username, self._host_id)
-        # success!
-        self._connected = True
-        return True
-
-    def get_transport(self):
-        """return an SSH transport, even if not connected"""
-        if not self._connected:
-            if not self.connect():
-                l.error('Connection failed')
-                return None
-        # sanity check
-        if self._connected:
-            return self._transport
-        return None
-
-    def _rsa_key_auth(self):
-        """authenticate to the destination with an RSA key from a key file"""
-        private_key = paramiko.RSAKey.from_private_key_file(self._key_file,
-                                                            self._password)
-        try:
-            self._transport.auth_publickey(self._username, private_key)
-        except paramiko.AuthenticationException:
-            l.error("Failed to authenticate.", exc_info=True)
-            return False
-        return self._transport.is_authenticated()
-
-    def execute_command(self, command, sensitive=False):
-        """
-        Execute the `command` and return its return code, stdout and stderr.
-
-        If the command is `sensitive`, the command itself will not be logged.
-        """
-        # for logging. Trenary operator seems like it would be perfect here.
-        logged_command = "[redacted]" if sensitive else command
-
-        # must have a transport first
+        # execute the command
         transport = self.get_transport()
-
-        # get a session channel and run the command inside
         chan = transport.open_session()
-        chan.set_name('command: ' + logged_command)
-        chan.setblocking(True)
-        chan.settimeout(10.0)
-
-        # and finally
         chan.exec_command(command)
 
-        # wait for the command to terminate
-        try:
-            exit_status = chan.recv_exit_status()
-        except socket.timeout:
-            l.error("Socket timeout when executing command %s", logged_command)
-            return (None, None, None)
+    def pipe_through_filter3(self, command, i_buf):
+        """
+        pipe input through a UNIX pipe on the remote end,
+        returning the result
+        """
+        # prepare for continuous feeding
+        o_buf = BytesIO()
+        e_buf = BytesIO()
 
-        if exit_status > 0:
-            l.warning("Command %s returned exit status %d",
-                      logged_command, exit_status)
-        # get stdout, stderr if available
-        stdout_buf = BytesIO()
-        stderr_buf = BytesIO()
-        while chan.recv_ready():
-            stdout_buf.write(chan.recv(self.COPY_BUFFER_SIZE))
-        while chan.recv_stderr_ready():
-            stderr_buf.write(chan.recv_stderr(self.COPY_BUFFER_SIZE))
-        chan.close()
+        # run the command
+        i, o, e = self.exec_command(command)
+        i_c, o_c, e_c = i.channel, o.channel, e.channel
 
-        return exit_status, stdout_buf, stderr_buf
+        # wait for them to finish
+        while not o.channel.exit_status_ready():
+            l.debug("select...")
+            rl, wl, xl = select([o_c, e_c], [i_c], [i_c, o_c, e_c], 1.0)
+            l.debug("results - r %s w %s x %s", repr(rl), repr(wl), repr(xl))
+            if i_c in wl:
+                l.debug("writing allowed")
+                buf = i_buf.read(1)
+                if len(buf) == 0:
+                    o.close()
+                    o_c.shutdown_write()
+                o.write(buf)
+            if o_c in rl:
+                l.debug("reading stdout")
+                o_buf.write(o.read(BUF_SIZE))
+            if e_c in rl:
+                l.debug("reading stderr")
+                e_buf.write(e.read(BUF_SIZE))
 
-    def _get_sftp_session(self):
-        """returns an SFTP session to the server, creating it if needed"""
-        if self._sftp_session is None:
+        # all done!
 
-            # must have a transport first
-            transport = self.get_transport()
+        return o_buf, e_buf
 
-            # get a session channel and run the command inside
-            chan = transport.open_sftp_client()
-            chan.setblocking(True)
-            chan.settimeout(10.0)
-            self._sftp_session = chan
+    def pipe_through_filter1(self, command, i_buf):
+        """
+        pipe input through a UNIX pipe on the remote end,
+        returning the result
+        """
+        # prepare for continuous feeding
+        o_buf = BytesIO()
+        e_buf = BytesIO()
+        i_event = Event()
+        o_event = Event()
+        e_event = Event()
 
-        return self._sftp_session
+        # run the command
+        i, o, e = self.exec_command(command)
 
-    def copy_local_to_remote(self, local, remote):
-        """ copy the `local` file to the `remote` path"""
+        # feed input, read from outputs
+        Thread(name="out", target=_feed_file,
+               args=(o, o_buf, o_event)).start()
+        Thread(name="err", target=_feed_file,
+               args=(e, e_buf, e_event)).start()
+        Thread(name="in", target=_feed_file,
+               args=(i_buf, i, i_event, True)).start()
 
-        l.debug("Copying (local)%s --> (remote)%s", local, remote)
+        # wait for them to finish
+        while not o.channel.exit_status_ready():
+            i_event.wait(1.0)
+            o_event.wait(1.0)
+            e_event.wait(1.0)
+            if i_event.is_set() and o_event.is_set() and e_event.is_set():
+                break
 
-        sftp_session = self._get_sftp_session()
-        sftp_session.put(local, remote)
+        # all done!
 
-        return True
+        return o_buf, e_buf
 
-    def copy_remote_to_local(self, remote, local):
-        """ copy the `remote` file to the `local` path"""
+    def pipe_through_filter(self, command, i_buf):
+        """
+        pipe input through a UNIX pipe on the remote end,
+        returning the result
+        """
+        # prepare for continuous feeding
+        o_buf = BytesIO()
+        e_buf = BytesIO()
+        i_event = Event()
+        o_event = Event()
+        e_event = Event()
 
-        l.debug("Copying (remote)%s --> (local)%s", remote, local)
+        # run the command
+        transport = self.get_transport()
+        chan = transport.open_session()
+        chan.exec_command(command)
 
-        sftp_session = self._get_sftp_session()
-        sftp_session.get(remote, local)
+        # feed input, read from outputs
+        Thread(name="out", target=_chan_receiver,
+               args=(chan.recv, o_buf, o_event)).start()
+        Thread(name="err", target=_chan_receiver,
+               args=(chan.recv_stderr, o_buf, o_event)).start()
+        Thread(name="in", target=_chan_sender,
+               args=(i_buf, chan, i_event)).start()
 
-        return True
+        # wait for them to finish
+        while not chan.exit_status_ready():
+            i_event.wait(1.0)
+            o_event.wait(1.0)
+            e_event.wait(1.0)
+            if i_event.is_set() and o_event.is_set() and e_event.is_set():
+                break
 
+        return o_buf, e_buf, chan.recv_exit_status()
+
+
+def main():
+    """test"""
+    host = 'syd.secauth.net'
+    user = 'root'
+    key_file = '/home/tech/.ssh/id_rsa'
+    hosts_file = '/home/tech/syd_known_hosts'
+
+    client = DBSSHClient()
+    client.load_host_keys(hosts_file)
+    client.set_missing_host_key_policy(AutoAddPolicy)
+    client.connect(hostname=host, username=user, key_filename=key_file)
+
+    i_buf = BytesIO(b"the quick brown fox jumped over the lazy dog \n" * 999)
+    o, e = client.pipe_through_filter('cat', i_buf)
+
+    print("Output", o.getvalue().decode('utf-8'))
+    print("Error", e.getvalue().decode('utf-8'))
+
+#    i, o, e = client.exec_command('c')
+#    i.close()
+#    while True:
+#        line = o.readline()
+#        if not line:
+#            break
+#        print(line[:-1])
+#    o.close()
+#    e.close()
+#    client.close()
+
+if __name__ == '__main__':
+    main()
