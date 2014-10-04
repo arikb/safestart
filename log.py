@@ -45,7 +45,7 @@ level: NOTSET
 args: (sys.stderr, )
 
 [formatter_std]
-format: %(asctime)s %(levelname)s %(module)s:%(lineno)d %(message)s
+format: %(asctime)s %(levelname)s [%(threadName)s] %(module)s:%(lineno)d %(message)s
 datefmt: %Y-%b-%d %H:%M:%S
 """)
 
