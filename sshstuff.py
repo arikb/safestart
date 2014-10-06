@@ -1,4 +1,23 @@
-"""do some useful things over SSH"""
+"""
+    DBSSHClient is a class that extends the paramiko SSHClient with some
+    advanced remote command execution and simulated file transfer for
+    dropbear (which would otherwise be done using SFTP or SCP).
+
+    Usage:
+
+    host = 'host.example.com'
+    user = 'root'
+    key_file = 'id_rsa'
+    hosts_file = 'my_known_hosts'
+
+    client = DBSSHClient()
+    client.load_host_keys(hosts_file)
+    client.set_missing_host_key_policy(AutoAddPolicy)
+    client.connect(hostname=host, username=user, key_filename=key_file)
+
+    client.send_file('xxx', 'yyy')
+    client.receive_file('xxx', 'yyy')
+"""
 
 from io import BytesIO
 from paramiko.client import (SSHClient,
@@ -6,14 +25,17 @@ from paramiko.client import (SSHClient,
                              RejectPolicy,
                              WarningPolicy)
 
-import socket  # mainly for socket errors
-from select import select
 from threading import Event, Thread
 
 import log
 l = log.getLogger(__name__)
 
 BUF_SIZE = 512
+
+# avoid PEP8 "imported but unused" warning
+assert AutoAddPolicy
+assert RejectPolicy
+assert WarningPolicy
 
 
 class DBSSHClient(SSHClient):
@@ -22,14 +44,16 @@ class DBSSHClient(SSHClient):
     limitations
     """
 
-    def pipe_through_filter(self, command, i_buf):
+    def pipe_through_filter(self, command, i_buf, o_buf=None, e_buf=None):
         """
         pipe input through a UNIX pipe on the remote end,
         returning the result
         """
         # prepare for continuous feeding
-        o_buf = BytesIO()
-        e_buf = BytesIO()
+        if o_buf is None:
+            o_buf = BytesIO()
+        if e_buf is None:
+            e_buf = BytesIO()
         i_event = Event()
         o_event = Event()
         e_event = Event()
@@ -82,13 +106,13 @@ class DBSSHClient(SSHClient):
 
         return o_buf, e_buf, chan.recv_exit_status()
 
-    def exec_command_output_only(self, command):
+    def exec_command_output_only(self, command, o_buf=None, e_buf=None):
         """
         run a command that has no input, returning stdout, stderr and
         the exit code
         """
         # basically pipe the command with no input
-        return self.pipe_through_filter(command, BytesIO())
+        return self.pipe_through_filter(command, BytesIO(), o_buf, e_buf)
 
     def exec_command_input_only(self, command, i_buf):
         """
@@ -97,37 +121,23 @@ class DBSSHClient(SSHClient):
         _o_buf, _e_buf, exit_code = self.pipe_through_filter(command, i_buf)
         return exit_code
 
+    def send_file(self, local_path, remote_path):
+        """
+        Simulate file transfer using 'cat' on the remote end
+        """
+        command = "cat > {0}".format(remote_path)
+        with open(local_path, 'rb') as local_file:
+            exit_code = self.exec_command_input_only(command, local_file)
+        return (exit_code == 0)
 
-def main():
-    """test"""
-    host = 'syd.secauth.net'
-    user = 'root'
-    key_file = '/home/tech/.ssh/id_rsa'
-    hosts_file = '/home/tech/syd_known_hosts'
-
-    client = DBSSHClient()
-    client.load_host_keys(hosts_file)
-    client.set_missing_host_key_policy(AutoAddPolicy)
-    client.connect(hostname=host, username=user, key_filename=key_file)
-
-    # i_buf = BytesIO(b"the quick brown fox jumped over the lazy dog \n" * 999)
-    i_buf = BytesIO()
-    o, e, exit_status = client.pipe_through_filter('cat < xxx', i_buf)
-
-    print("Output", o.getvalue().decode('utf-8'))
-    print("Error", e.getvalue().decode('utf-8'))
-    print("Exit status", exit_status)
-
-#    i, o, e = client.exec_command('c')
-#    i.close()
-#    while True:
-#        line = o.readline()
-#        if not line:
-#            break
-#        print(line[:-1])
-#    o.close()
-#    e.close()
-#    client.close()
-
-if __name__ == '__main__':
-    main()
+    def receive_file(self, remote_path, local_path):
+        """
+        Simulate file transfer using 'cat' on the remote end
+        """
+        command = "cat < {0}".format(remote_path)
+        with open(local_path, 'wb') as local_file:
+            (_o_buf,
+             _e_buf,
+             exit_code) = self.exec_command_output_only(command,
+                                                        local_file)
+        return (exit_code == 0)
