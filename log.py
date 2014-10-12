@@ -26,7 +26,7 @@ LOG_CONFIG_TEMPLATE_FILE = 'log.ini'
 log_file_path_re = re.compile(r'LOG_FILE_PATH')
 EMERGENCY_LOGGER = StringIO("""
 [loggers]
-keys: root
+keys: root,paramiko,sshstuff
 
 [handlers]
 keys: stderr
@@ -38,6 +38,18 @@ keys: std
 level: DEBUG
 handlers: stderr
 
+[logger_paramiko]
+level: WARNING
+handlers: stderr
+propagate: 1
+qualname: paramiko
+
+[logger_sshstuff]
+level: INFO
+handlers: stderr
+propagate: 1
+qualname: sshstuff
+
 [handler_stderr]
 class: StreamHandler
 formatter: std
@@ -45,7 +57,7 @@ level: NOTSET
 args: (sys.stderr, )
 
 [formatter_std]
-format: %(asctime)s %(levelname)s [%(threadName)s] %(module)s:%(lineno)d %(message)s
+format: %(asctime)s %(name)s %(levelname)s [%(threadName)s] %(module)s:%(lineno)d %(message)s
 datefmt: %Y-%b-%d %H:%M:%S
 """)
 
