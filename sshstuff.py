@@ -20,12 +20,13 @@
 """
 
 from io import BytesIO
+from threading import Event, Thread
+from time import time
+
 from paramiko.client import (SSHClient,
                              AutoAddPolicy,
                              RejectPolicy,
                              WarningPolicy)
-
-from threading import Event, Thread
 
 import log
 l = log.getLogger(__name__)
@@ -71,6 +72,7 @@ class DBSSHClient(SSHClient):
             send everything in the buffer to the channel
             then shut sending down
             """
+            l.debug("sending to channel...")
             _blocking_loop(source.read, chan.sendall)
             l.debug("shutting channel write side")
             chan.shutdown_write()
@@ -79,8 +81,9 @@ class DBSSHClient(SSHClient):
 
         def _chan_receiver(chan_recv, dest, event):
             """receive what we can from a channel until EOF"""
+            l.debug("Receiving from channel...")
             _blocking_loop(chan_recv, dest.write)
-            l.debug("EOF encountered, closing destination")
+            l.debug("EOF encountered")
             event.set()
 
         # run the command
@@ -89,6 +92,7 @@ class DBSSHClient(SSHClient):
         chan.exec_command(command)
 
         # feed input, read from outputs
+        l.debug("new threads go!")
         Thread(name="out", target=_chan_receiver,
                args=(chan.recv, o_buf, o_event)).start()
         Thread(name="err", target=_chan_receiver,
@@ -97,12 +101,16 @@ class DBSSHClient(SSHClient):
                args=(i_buf, chan, i_event)).start()
 
         # wait for them to finish
+        start_time = time()
         while not chan.exit_status_ready():
             i_event.wait(1.0)
             o_event.wait(1.0)
             e_event.wait(1.0)
             if i_event.is_set() and o_event.is_set() and e_event.is_set():
                 break
+            l.debug("waiting %.3f seconds so far...", time() - start_time)
+
+        l.debug("execution time - %.3f seconds", time() - start_time)
 
         return o_buf, e_buf, chan.recv_exit_status()
 
@@ -119,6 +127,14 @@ class DBSSHClient(SSHClient):
         run a command and discard the output
         """
         _o_buf, _e_buf, exit_code = self.pipe_through_filter(command, i_buf)
+        return exit_code
+
+    def exec_command_no_io(self, command):
+        """
+        run a command without any input and discard the output
+        """
+        _o_buf, _e_buf, exit_code = self.pipe_through_filter(command,
+                                                             BytesIO())
         return exit_code
 
     def send_file(self, local_path, remote_path):
@@ -140,4 +156,22 @@ class DBSSHClient(SSHClient):
              _e_buf,
              exit_code) = self.exec_command_output_only(command,
                                                         local_file)
+        return (exit_code == 0)
+
+    def chmod(self, path, mode):
+        """change the mode of the file. mode is a string."""
+        command = "chmod {0} {1}".format(mode, path)
+        exit_code = self.exec_command_no_io(command)
+        return (exit_code == 0)
+
+    def rm(self, path):
+        """remove a path"""
+        command = "rm -f {0}".format(path)
+        exit_code = self.exec_command_no_io(command)
+        return (exit_code == 0)
+
+    def file_exists(self, path):
+        """returns True if the file exists"""
+        command = "ls {0}".format(path)
+        exit_code = self.exec_command_no_io(command)
         return (exit_code == 0)
