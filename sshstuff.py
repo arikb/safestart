@@ -146,6 +146,14 @@ class DBSSHClient(SSHClient):
             exit_code = self.exec_command_input_only(command, local_file)
         return (exit_code == 0)
 
+    def send_file_obj(self, file_obj, remote_path):
+        """
+        Simulate file transfer using 'cat' on the remote end
+        """
+        command = "cat > {0}".format(remote_path)
+        exit_code = self.exec_command_input_only(command, file_obj)
+        return (exit_code == 0)
+
     def receive_file(self, remote_path, local_path):
         """
         Simulate file transfer using 'cat' on the remote end
