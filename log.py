@@ -26,7 +26,7 @@ LOG_CONFIG_TEMPLATE_FILE = 'log.ini'
 log_file_path_re = re.compile(r'LOG_FILE_PATH')
 EMERGENCY_LOGGER = StringIO("""
 [loggers]
-keys: root,paramiko,sshstuff
+keys: root,paramiko,sshstuff,log
 
 [handlers]
 keys: stderr
@@ -49,6 +49,12 @@ level: INFO
 handlers: stderr
 propagate: 1
 qualname: sshstuff
+
+[logger_log]
+level: WARNING
+handlers: stderr
+propagate: 1
+qualname: log
 
 [handler_stderr]
 class: StreamHandler
