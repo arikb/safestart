@@ -1,10 +1,16 @@
 '''
-Created on 13 Oct 2014
 
-@author: tech
+This tripwire modules is named after the once-popular "tripwire" from 1992,
+later on to form the basis for Tripwire, Inc.
+
+It runs a simple command on the remote server requesting the list of files
+and their cryptographic hashes, and maintains a database of previous requests
+so that any change can be easily detected.
+
+Because the list is big, some attempt to compress it using gzip is made.
+
 '''
 
-from gzip import GzipFile
 import os
 
 import log
@@ -80,30 +86,11 @@ class TripwireDatabase:
     def get_remote_sums(self):
         '''get the file checksums from the remote server'''
 
-        l.debug("Copying over sum program")
-        self._ssh_client.send_file(self._platform.SUM_PROGRAM_LOCAL,
-                                   self._platform.SUM_PROGRAM_REMOTE)
-        self._ssh_client.chmod(self._platform.SUM_PROGRAM_REMOTE, "755")
-        # get the result of running the checksum on all regular files
-        l.debug("Applying sum to regular files")
-        cmd = self._platform.SUM_COMMAND
-        result = self._ssh_client.exec_command_output_only(cmd)
-        (o_buf, e_buf, exit_code) = result
-        # delete sum program
-        self._ssh_client.rm(self._platform.SUM_PROGRAM_REMOTE)
-
-        # error checking
-        if not exit_code == 0:
-            l.error("Could not retrieve sums. Error: %s",
-                    e_buf.getvalue().decode('utf-8'))
-            return None, None
-
-        # wrap the file in a zip object to unzip
-        o_buf.seek(0)
-        unzipped_out = GzipFile(fileobj=o_buf)
+        l.debug("Requesting remote sums")
+        sums_stream = self._platform.get_remote_sums(self._ssh_client)
 
         l.debug("Parsing the results")
-        names, name_map = _parse_database(unzipped_out)
+        names, name_map = _parse_database(sums_stream)
         names.sort()
 
         l.debug("Removing excluded names")
