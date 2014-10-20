@@ -2,6 +2,9 @@
 
 '''
 
+from collections import namedtuple
+from configparser import ConfigParser
+import os
 import sys
 
 import platforms
@@ -68,69 +71,96 @@ def parse_arguments(arg_list):
     return args
 
 
-PS_CMD = 'ps lw'
-
-
-def get_process_list(client):
-    '''run ps remotely retrieving the running processes'''
-    # run PS
-    out_buf, _err_buf, exit_code = client.exec_command_output_only(PS_CMD)
-    if exit_code:
-        l.debug("Could not enumerate remote processes")
-        return None
-
-    # parse
-    out_buf.seek(0)
-    headers = out_buf.readline().decode('utf-8').split()
-    hnum = len(headers)
-    l.debug("Process headers: %s", repr(headers))
-    lines = list()
-    for line in out_buf:
-        lines.append(dict(zip(headers,
-                              line.decode('utf-8').split(None, hnum-1)
-                              )))
-
-    return lines
-
 UPDATE = 'update'
 SKIP = 'skip-sums'
+CONFIG = 'conf'
+DEFAULT_CONFIG = 'safestart.conf'
+DEFAULT_USER = 'root'
+HOST_FIELD = 'host'
+USER_FIELD = 'username'
+KEYFILE_FIELD = 'key_file'
+PLATFORM_FIELD = 'platform'
+PASSWORD_FIELD = 'password'
+KNOWN_HOSTS = 'known_hosts'
+DEFAULT_KNOWN_HOSTS = 'known_hosts.db'
+
+HostConfig = namedtuple(typename='HostConfig',
+                        field_names=[HOST_FIELD,
+                                     USER_FIELD,
+                                     KEYFILE_FIELD,
+                                     PLATFORM_FIELD,
+                                     PASSWORD_FIELD])
+
+
+def load_config_file(args):
+    '''load data from a configuration file'''
+    config_file = 'safestart.conf'
+    if CONFIG in args:
+        config_file = args[CONFIG]
+
+    conf = ConfigParser()
+    conf.read(config_file)
+    # every section is a host
+    hosts = list()
+    for section in conf.sections():
+        host = section
+        username = conf.get(section, USER_FIELD, fallback='root')
+        key_file = conf.get(section, KEYFILE_FIELD)
+        platform = getattr(platforms, conf.get(section, PLATFORM_FIELD))
+        password = conf.get(section, PASSWORD_FIELD)
+        hosts.append(HostConfig(host, username, key_file, platform, password))
+
+    return hosts
+
+
+def known_hosts(args):
+    '''return the known hosts file'''
+    if KNOWN_HOSTS in args:
+        return args[KNOWN_HOSTS]
+    else:
+        return os.path.abspath(DEFAULT_KNOWN_HOSTS)
 
 
 def main(args):
     '''do it'''
-    # first SSH and do a checksum
-    host = 'syd.secauth.net'
-    user = 'root'
-    key_file = '/home/tech/.ssh/id_rsa'
-    hosts_file = '/home/tech/syd_known_hosts'
-    platform = platforms.Ubuntu_14_04
+    # get some configuration going
+    hosts_file = known_hosts(args)
+    hosts_config = load_config_file(args)
 
-    client = DBSSHClient()
-    client.load_host_keys(hosts_file)
-    client.set_missing_host_key_policy(AutoAddPolicy)
-    client.connect(hostname=host, username=user, key_filename=key_file)
+    # do for all hosts
+    for host_config in hosts_config:
+        client = DBSSHClient()
+        if os.path.exists(hosts_file):
+            client.load_host_keys(hosts_file)
+        client.set_missing_host_key_policy(AutoAddPolicy())
+        client.connect(hostname=host_config.host,
+                       username=host_config.username,
+                       key_filename=host_config.key_file)
+        client.save_host_keys(hosts_file)
 
-    if SKIP in args:
-        l.info("Skipping tripwire checks")
-    else:
-        twdb = TripwireDatabase(client, host, platform)
-        twdb.get_remote_sums()
-
-        if UPDATE in args:
-            twdb.update_database()
-            return
-
-        l.debug("Comparing remote sums to database")
-        diff = twdb.compare_databases()
-        if len(diff) == 0:
-            l.debug("Compare successful")
+        if SKIP in args:
+            l.info("Skipping tripwire checks")
         else:
-            l.error("Compare failed, differences to follow")
-            for action, file_name in diff:
-                l.error("%s %s", action, file_name)
-            return
+            twdb = TripwireDatabase(client, host_config.host,
+                                    host_config.platform)
+            twdb.get_remote_sums()
 
-    platform.enter_password(client, args['password'])
+            if UPDATE in args:
+                twdb.update_database()
+                return
+
+            l.debug("Comparing remote sums to database")
+            diff = twdb.compare_databases()
+            if len(diff) == 0:
+                l.debug("Compare successful")
+            else:
+                l.error("Compare failed, differences to follow")
+                for action, file_name in diff:
+                    l.error("%s %s", action, file_name)
+                return
+
+        host_config.platform.enter_password(client, host_config.password)
+        client.close()
 
 
 if __name__ == '__main__':

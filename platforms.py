@@ -71,7 +71,7 @@ exit
         if not exit_code == 0:
             l.error("Could not retrieve sums. Error: %s",
                     e_buf.getvalue().decode('utf-8'))
-            return None, None
+            return None
 
         # wrap the file in a zip object to unzip
         o_buf.seek(0)
