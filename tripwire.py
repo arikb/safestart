@@ -7,8 +7,6 @@ It runs a simple command on the remote server requesting the list of files
 and their cryptographic hashes, and maintains a database of previous requests
 so that any change can be easily detected.
 
-Because the list is big, some attempt to compress it using gzip is made.
-
 '''
 
 import os
