@@ -1,7 +1,5 @@
 '''
-Created on 20 Oct 2014
-
-@author: arikb
+Platform specific classes
 '''
 
 from fnmatch import translate as fnmatch_translate

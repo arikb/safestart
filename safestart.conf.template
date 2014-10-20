@@ -1,0 +1,14 @@
+# section name should be valid, resolvable hosts (or IP addresses)
+
+[myhost.example.net]
+# only platform currently supported
+platform: Ubuntu_14_04
+
+# the public key file
+key_file: /path/to/private/key/file
+
+# username defaults to root
+#username: toor
+
+# password goes here
+password: TrustNo1
