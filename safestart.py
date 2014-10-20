@@ -2,12 +2,9 @@
 
 '''
 
-from fnmatch import translate as fnmatch_translate
-from io import BytesIO
-import re
 import sys
-from time import sleep
 
+import platforms
 from sshstuff import DBSSHClient, AutoAddPolicy
 from tripwire import TripwireDatabase
 
@@ -99,105 +96,6 @@ UPDATE = 'update'
 SKIP = 'skip-sums'
 
 
-class Ubuntu_14_04:
-
-    PIPE_NAME = "/lib/cryptsetup/passfifo"
-    SUM_PROGRAM_LOCAL = '/usr/bin/sha256sum'
-    SUM_PROGRAM_REMOTE = '/root/file_sum'
-    PASSWORD_SCRIPT_REMOTE = '/root/pass_script'
-    SUM_COMMAND = ('find / -type f -xdev -exec {0} {{}} \; '
-                   '| gzip').format(SUM_PROGRAM_REMOTE).encode('ascii')
-    SCRIPT_EXEC_COMMAND = '. {}'.format(PASSWORD_SCRIPT_REMOTE)
-    EXCLUDE_FILES = (
-        '*.pid',
-        SUM_PROGRAM_REMOTE,
-        )
-    EXCLUDE_PATTERNS = [re.compile(fnmatch_translate(g).encode('ascii'))
-                        for g in EXCLUDE_FILES]
-    EXCLUDE_PATTERN = re.compile(('(' + '|'.join([fnmatch_translate(g)
-                                                  for g
-                                                  in EXCLUDE_FILES]
-                                                 ) + ')').encode('ascii'))
-
-    PASSWORD_ENTRY_SCRIPT = """
-echo 'Stopping plymouth...'
-plymouth --wait quit
-echo 'Waiting for plymouth to stop and the cryptosetup to restart...'
-while [ ! -p {pipe_name} ]; do
-    sleep 1
-    echo 'Still waiting...'
-done
-echo 'Ready for password entry, taking the network down'
-sleep 2
-ip address del {ip_address} dev {dev}
-ip link set dev {dev} down
-echo -ne '{password}' > {pipe_name}
-exit
-"""
-
-    CMD_IP_ADDR_LIST = 'ip address list'
-    INET_MATCH = re.compile(r'\s*inet\s(?P<ip>[^\s]*)'
-                            r'.*\s+(?P<dev>[^\s]+)').match
-
-    @classmethod
-    def _get_ip_and_dev(cls, client):
-        '''
-        detect the IP address of the remote machine (including netmask) and the
-        device it's on
-        '''
-
-        (out_f,
-         _err,
-         ret_code) = client.exec_command_output_only(cls.CMD_IP_ADDR_LIST)
-
-        if ret_code > 0:
-            l.error("Failed to retreive remote IP / dev")
-            return None, None
-
-        # parse the output
-        out_f.seek(0)
-        for line in out_f:
-            match = cls.INET_MATCH(line.decode('utf-8'))
-            if match:
-                ip = match.group('ip')
-                dev = match.group('dev')
-                if dev != 'lo':  # any IP address that's not loopback
-                    break
-        else:
-            l.error("No IP address found")
-            return None, None
-
-        return ip, dev
-
-    @classmethod
-    def enter_password(cls, client, password):
-        l.debug("getting the IP address and device")
-        ip, dev = cls._get_ip_and_dev(client)
-        if ip is None:
-            l.error("Could not retrieve remote IP / device")
-            return False
-
-        l.debug("Creating and running the password entry script")
-
-        script = cls.PASSWORD_ENTRY_SCRIPT.format(ip_address=ip,
-                                                  dev=dev,
-                                                  password=password,
-                                                  pipe_name=cls.PIPE_NAME)
-
-        client.send_file_obj(BytesIO(script.encode('utf-8')),
-                             cls.PASSWORD_SCRIPT_REMOTE)
-        (out_f,
-         _err_f,
-         _ret_code) = client.exec_command_output_only(cls.SCRIPT_EXEC_COMMAND)
-
-        l.debug("Password entry script complete.")
-
-        for line in out_f:
-            l.debug('Remote said: %s', line.decode('utf-8'))
-
-        return True
-
-
 def main(args):
     '''do it'''
     # first SSH and do a checksum
@@ -205,7 +103,7 @@ def main(args):
     user = 'root'
     key_file = '/home/tech/.ssh/id_rsa'
     hosts_file = '/home/tech/syd_known_hosts'
-    platform = Ubuntu_14_04
+    platform = platforms.Ubuntu_14_04
 
     client = DBSSHClient()
     client.load_host_keys(hosts_file)
