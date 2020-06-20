@@ -54,6 +54,27 @@ coverage.xml
 # Sphinx documentation
 docs/_build/
 
+*.DS_Store
+
+# Microsoft Visual Studio Code workspace config
+.vscode
+
+# local temporary directory
+tmp/
+
+# local logs
+logs/
+
+# key material
+*.key
+
+# credentials
+credentials.json
+*.env
+
+# database files
+db/*
+
 # ignore tripwire databases
 *.tripwire.db
 known_hosts.db
